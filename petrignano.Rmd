@@ -1,0 +1,1012 @@
+---
+title: "Water Analytics: Predicting water level direction in the Petrignano aquifer"
+author: "Chiara Cavalagli, Stefanija Galevska, Santiago Víquez"
+date: "July, 2022"
+output:
+  pdf_document: default
+  pdf_notebook: default
+knit: (function(input, encoding) {
+    rmarkdown::render(
+      input = input,
+      encoding = encoding,
+      envir = globalenv()
+    )
+  })
+urlcolor: blue
+---
+
+# 1. Introduction
+Water is one of the main ingredients for life on earth. Due to environmental changes every year more and more waterbodies such as lakes, rivers and aquifers are drying up. Waterbodies in Italy are not the exception. In the time of writing many regions in Italy have declared state of emergency since during the current summer many waterbodies that were used to supply water to towns are now almost empty.
+
+The fact that Italy is currently facing a shortage of water motivated us to explore if we can predict the future of one of it's waterbodies. Specifically the Petrignano aquifer located in Umbria a city in the center of the country. In this report we display our analysis and the code we used to achieve it, we talk about anomalies in the data, explore each feature that we had access, and predicted the direction of the water levels using a baseline and a logistic regression model with lag variables.
+
+# 2. Data
+In this analysis we will be working with a [dataset](https://www.kaggle.com/competitions/acea-water-prediction/data?select=Aquifer_Petrignano.csv) from the [Acea Group](https://www.gruppo.acea.it) an Italian multiutility operator. Acea Group manages and develops water and electricity networks and environmental services. For this analysis we will focus on one of their data sets of the Petrignano aquifer. 
+
+The Petrignano aquifer is located in Umbria, a region of central Italy. This aquifer is fed by three other underground aquifers and the Chiascio river.
+
+In **Table 1** we can see the information that we have available about the Petrignano aquifer. Depth_to_Groundwater_P24 and Depth_to_Groundwater_P25 are our main measures of interests. We will try to forecast the trend direction of both of them by using their past values and other information such as rainfall, temperature, volume, etc.
+
+| Field                                                             | Format      | Description                                                                               |
+|-------------------------------------------------------------------|-------------|-------------------------------------------------------------------------------------------|
+| Date                                                              | Daily Date  | Uniquely identifies a day (Primary Key)                                                   |
+| Rainfall_Bastia_Umbra                                             | Real Number | Quantity of rain falling, expressed in millimeters (mm)                                   |
+| Depth_to_Groundwater_P24                                          | Real Number | Groundwater level, expressed in (m) from the ground floor, detected by the piezometer P24 |
+| Depth_to_Groundwater_P25                                          | Real Number | Groundwater level, expressed in (m) from the ground floor, detected by the piezometer P25 |
+| Temperature_Bastia_Umbra                                          | Real Number | Temperature, expressed in °C                                                              |
+| Temperature_Petrignano                                            | Real Number | Temperature, expressed in °C                                                              |
+| Volume_C10_Petrignano                                             | Real Number | Volume of water, expressed in cubic meters (mc)                                           |
+| Hydrometry_Fiume_Chiascio_Petrignano                              | Real Number | Groundwater level, expressed in meters (m)                                                |
+\begin{center}
+  \textbf{Table 1:} Feature description
+\end{center}
+
+This experiment is particularly interesting because of the importance of predicting the trend direction of the depth to groundwater. This is something every water supply company would like to explore. Since during different periods of the year waterbodies start to drain, the water companies need to forecast the water level so they can successfully handle daily consumption.
+
+
+## 2.1 Data Cleaning
+
+Let's begin by taking a look at basic statistics of the Petrignano dataset.
+
+
+```{r}
+df <- read.csv("Aquifer_Petrignano.csv")
+colnames(df)[1]="Date"
+summary(df)
+```
+
+We see that all columns, including the targets: Depth_to_Groundwater_P24, Depth_to_Groundwater_P25 contain NA's values. Let's take a deeper look to see if we can find for which dates these values are NA.
+
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+df$Date <- as.Date(df$Date, format="%d/%m/%Y")
+df$Month <- format(as.Date(df$Date, format="%m"), "%m")
+df$Year <- format(as.Date(df$Date, format="%d/%m/%Y"),"%Y")
+
+year.nan <- df %>%
+  group_by(Year) %>%
+  summarise_all(funs(sum(is.na(.))))
+
+print(year.nan %>% 
+  select(Year, Rainfall_Bastia_Umbra:Temperature_Bastia_Umbra))
+
+print(year.nan %>% 
+  select(Year, Temperature_Petrignano:Hydrometry_Fiume_Chiascio_Petrignano))
+```
+
+
+From the printed outputs above we can see that years 2006, 2007 and 2008 are the ones that contain most of the NA's values. Because of the lack of information for these years, we are going to restrict our analysis on data from 2009 to 2020.
+
+
+```{r}
+df <- filter(df, Year > 2008)
+```
+
+
+Let's explore now the NA's in the columns `Depth_to_Groundwater_P24` and `Depth_to_Groundwater_P25`. These two columns are of special interest for the analysis since from them we are going to build the target variables `Direction_P24` and `Direction_P25`. This directions will let us know if the depth level of the aquifer is growing or not.
+
+
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(gridExtra)
+
+p1 <- ggplot(df, aes(x=Date, y=Depth_to_Groundwater_P24)) +
+  geom_line() +
+  xlab("")
+
+p2 <- ggplot(df, aes(x=Date, y=Depth_to_Groundwater_P25)) +
+  geom_line() +
+  xlab("")
+
+grid.arrange(p1, p2, nrow = 1)
+```
+
+\begin{center}
+  \textbf{Figure 1:} \text{Trend of Depth\_to\_Groundwater\_\{P24, P25\}}
+\end{center}
+
+
+In **Figure 1** we see small gaps of records on both `Depth_to_Groundwater` trends. It is easy to spot that the course of the trends is somewhat obvious and applying interpolation would be a good idea to fill in the gaps. We follow with the application and observe the results.
+
+
+```{r message=FALSE, warning=FALSE}
+library(imputeTS)
+inp1 <- na_interpolation(x=df$Depth_to_Groundwater_P24)
+inp2 <- na_interpolation(x=df$Depth_to_Groundwater_P25)
+inp3 <- na_interpolation(x=df$Volume_C10_Petrignano)
+
+p1 <- ggplot_na_imputations(df$Depth_to_Groundwater_P24, inp1)
+p2 <- ggplot_na_imputations(df$Depth_to_Groundwater_P25, inp2)
+
+df$Depth_to_Groundwater_P24 = inp1
+df$Depth_to_Groundwater_P25 = inp2
+df$Volume_C10_Petrignano = inp3
+
+grid.arrange(p1, p2, nrow = 1)
+```
+\begin{center}
+  \textbf{Figure 2:} \text{Left: Imputed values for Depth\_to\_Groundwater\_P24. Right: Imputed values for Depth\_to\_Groundwater\_P25.}
+\end{center}
+
+
+In the code cell above we perform an interpolation to fill the NA values for columns `Depth_to_Groundwater_{P24, P25}` and `Volume_C10_Petrignano`. We can see in **Figure 2** the known and imputed values. The imputed values clearly fit in the trend of already known values, it is our opinion that using this method is a safe approach. In theory we should not have any NA's values left in our data, however let's confirm that assuption by running the cell below.
+
+
+```{r warning=FALSE}
+colSums(is.na(df))
+```
+
+
+## 2.2 Train, Validation and Test sets
+Before further analysis of our data or creating any new features, let's split our imputed data set in three parts. These three parts will serve as our train, validation, and test sets accordingly. We do this to avoid data leakage and to build a robust model validation strategy.
+
+
+```{r echo=TRUE}
+train <- filter(df, Year < 2017) # 2922 samples
+val <- filter(df, Year >= 2017 & Year <= 2018) # 730 samples
+test <- filter(df, Year > 2018) # 547 samples
+```
+
+
+```{r include=FALSE}
+cat("Train set")
+cat("\nNumber of samples:",  nrow(train))
+cat("\nYears in data:", min(train$Year), "-", max(train$Year))
+
+cat("\n\nValidation set")
+cat("\nNumber of samples:",  nrow(val))
+cat("\nYears in data:", min(val$Year), "-", max(val$Year))
+
+cat("\n\nTest set")
+cat("\nNumber of samples:",  nrow(test))
+cat("\nYears in data:", min(test$Year), "-", max(test$Year))
+```
+## 2.3 Feature Engineering
+
+### 2.3.1 Lag Features
+Lag features are values at previous time steps. Our assumption is that what happened in the past can influence what it going to happen in the future. 
+
+We are going to create a `lag_1` and `lag_2` for both `Depth_to_Groundwater_{P24, P25}` targets. The assumption of these new features is that the value of 1, 2 time units behind of `Depth_to_Groundwater_{P24, P25}` contain crucial information that can help us estimate it's future value.
+
+
+```{r}
+create_lag <- function(data, col_name, step) {
+  name <- paste("lag_", step, "_", col_name, sep="")
+  data[name] <- lag(data[col_name], n=step)
+  
+  return(data)
+}
+
+train <- create_lag(train, "Depth_to_Groundwater_P24", 1)
+train <- create_lag(train, "Depth_to_Groundwater_P25", 1)
+
+train <- create_lag(train, "Depth_to_Groundwater_P24", 2)
+train <- create_lag(train, "Depth_to_Groundwater_P25", 2)
+```
+
+### 2.3.2 Creating The Direction Column
+Part of the main focus of this project is to predict the future directions in which our depth to groundwater values will continue. Meaning, taking into account the previous measurements of the depths and also other features, plainly said we aim to predict if the depth level of the aquifer will grow or not.
+
+
+```{r}
+create_direction <- function(data, col_name) {
+  # create direction column for Depth_to_Groundwater_P24
+  direction_col <- paste("Direction_", strsplit(col_name, "_")[[1]][[4]], sep="")
+  lag_direction_col <- paste("lag_1_", col_name, sep="")
+  data[direction_col] <- as.numeric(abs(data[col_name])-abs(data[lag_direction_col]) < 0)
+  data[direction_col][is.na(data[direction_col])] <- 0
+  
+  return(data)
+}
+
+train <- create_direction(train, "Depth_to_Groundwater_P24")
+train <- create_direction(train, "Depth_to_Groundwater_P25")
+```
+
+
+### 2.3.3 Date Time Features
+One of the assumptions that we would like to test is to see if particular seasons such as winter and summer have strong effects on the water levels. Because of this we will create a `season` column that states the current season.
+
+
+```{r}
+create_season <- function(data) {
+  data$season <-"winter"
+  data$season[as.numeric(data$Month)>2&as.numeric(data$Month)<5]<-"spring"
+  data$season[as.numeric(data$Month)>4&as.numeric(data$Month)<9]<-"summer"
+  data$season[as.numeric(data$Month)>8&as.numeric(data$Month)<12]<-"autumn"
+  data$season<-factor(data$season,levels=c("summer","spring","winter","autumn"))
+  
+  return(data)
+}
+
+train <- create_season(train)
+```
+
+
+# 3. Exploratory Data Analysis
+## 3.1 Exploring Depth columns
+### 3.1.1 How does `Depth_to_Groundwater_P24` and `Depth_to_Groundwater_P25` differ from each other?
+
+As we learned from the data set description, we have two columns with values from two different piezometers (device used for measuring liquid pressure). In the following block we plot the data about these columns and observe the similarities.
+
+
+```{r message=FALSE, warning=FALSE}
+p1 <- ggplot(train, aes(x=Depth_to_Groundwater_P24)) +
+  geom_histogram(aes(y = ..density..),
+                 colour = 1, fill = "white") +
+  geom_density(lwd = 1, colour = 5,
+               fill = 5, alpha = 0.25)
+
+
+p2 <- ggplot(train, aes(x=Depth_to_Groundwater_P25)) +
+  geom_histogram(aes(y = ..density..),
+                 colour = 1, fill = "white") +
+  geom_density(lwd = 1, colour = 2,
+               fill = 2, alpha = 0.25)
+
+grid.arrange(p1, p2, nrow = 1)
+```
+\begin{center}
+  \textbf{Figure 3:} \text{Distribution of Depth\_to\_Groundwater\_\{P24, P25\}}
+\end{center}
+
+We note that the measurements from the two devices slightly differ. This can be due to the fact that they are positioned in different areas of the aquifer or it is a case of two different models of device. This information is not available to us so we assume one of the two. Most importantly we know that they measure the same aquifer and the resulted values are similar to each other that we can consider both and explore them both. 
+
+Following is a figure to compare them more closely.
+
+
+```{r message=FALSE, warning=FALSE}
+p1 <- ggplot(train) +
+  geom_density(aes(x=Depth_to_Groundwater_P24, color="Depth_to_Groundwater_P24")) +
+  geom_density(aes(x=Depth_to_Groundwater_P25, color="Depth_to_Groundwater_P25")) +
+  xlab("Depth to Groundwater (m)")
+
+p1
+```
+\begin{center}
+  \textbf{Figure 4:} \text{ Comparison of Depth\_to\_Groundwater\_\{P24, P25\} distributions}
+\end{center}
+
+
+### 3.1.2 `Depth_to_Groundwater_P24` and `Depth_to_Groundwater_P25` trought the years
+
+Another important relation to explore is the behavior of the depth to groundwater w.r.t the years. For example from **Figure 5** it is clear that 2012 can be considered an outlier year, but only in theoretical sense. The difference in the depth that happened in 2012 is a clear indication of the importance and impact of some features, which we will see why in the following sections.
+
+```{r}
+p1 <- ggplot(train, aes(x=Year, y=Depth_to_Groundwater_P24)) + 
+    geom_boxplot(fill=5, alpha=0.2) + 
+    xlab("Year")
+
+p2 <- ggplot(train, aes(x=Year, y=Depth_to_Groundwater_P25)) + 
+    geom_boxplot(fill=2, alpha=0.2) + 
+    xlab("Year")
+
+grid.arrange(p1, p2, nrow = 1)
+```
+\begin{center}
+  \textbf{Figure 5:} \text{ Boxplots Depth\_to\_Groundwater\_\{P24, P25\} per Year}
+\end{center}
+
+
+### 3.1.3 `Depth_to_Groundwater_P24` and `Depth_to_Groundwater_P25` trought the months
+
+Furthermore what can be useful is to understand the behavior of the depth per each month. In order to return a proper summary, each month is represented by the mean of all the depths measured through the years.
+
+
+```{r message=FALSE, warning=FALSE}
+#Depth to Groundwater P24
+train_month_24 <- train %>%
+  group_by(Month) %>%
+  summarise(Depth_to_Groundwater_P24= round(mean(Depth_to_Groundwater_P24), 2))
+
+month_24 <- train_month_24 %>%
+  ggplot(aes(x = Month, y = Depth_to_Groundwater_P24)) +
+  geom_point(color = "blue") +
+  scale_x_discrete(labels=as.numeric(unique(train$Month))) +
+  labs(title = "Depth - Month - Year", x="Month", y="Depth P25") + theme_bw(base_size = 15) +
+  geom_line(aes(as.numeric(train_month_24$Month), Depth_to_Groundwater_P24), colour='orange') 
+
+#Depth to Groundwater P25
+train_month_25 <- train %>%
+  group_by(Month) %>%
+  summarise(Depth_to_Groundwater_P25= round(mean(Depth_to_Groundwater_P25), 2))
+
+month_25 <- train_month_25 %>%
+  ggplot(aes(x = Month, y = Depth_to_Groundwater_P25)) +
+  geom_point(color = "blue") +
+  scale_x_discrete(labels=as.numeric(unique(train$Month))) +
+  labs(title = "Depth - Month - Year", x="Month", y="Depth P25") + theme_bw(base_size = 15) +
+  geom_line(aes(as.numeric(train_month_25$Month), Depth_to_Groundwater_P25), colour='orange') 
+
+grid.arrange(month_24, month_25)
+```
+\begin{center}
+  \textbf{Figure 6:} \text{ Mean of each month through the years of Depth\_to\_Groundwater\_\{P24, P25\} distributions}
+\end{center}
+
+It's easy to observe from **Figure 6** that both distributions tend to decrease its depths to groundwater until the first half of the year, more or less during the period of the end of the winter and the entire spring, when the weather becomes warmer. As the summer begins, the depth increases for the rest of the year with a slight decrease in the last month. 
+What comes out is that the relationship between the depth and the seasons is crucial. This will also be discussed later when we use season as one of the predictors to asses the water level direction.
+
+
+### 3.1.4 `Depth_to_Groundwater_P24` and `Depth_to_Groundwater_P25` trought the seasons
+
+Observing the data when divided by years and months, we conclude what was already obvious: this type of problem and data is strongly dependent of all year rounds weather patterns. This led us to explore also the behavior of the data when divided into seasons. In the following we do the separation using the previously defined months to create our season column.
+
+```{r}
+p1 <- ggplot(train) +
+  aes(x=Date, y=Depth_to_Groundwater_P24, colour=season) +
+  geom_point()+
+  ggtitle("Depth to GroundWater p24 through the seasons")
+
+
+p2 <- ggplot(train) +
+  aes(x=Date, y=Depth_to_Groundwater_P25, colour=season) +
+  geom_point()+
+  ggtitle("Depth to GroundWater p25 through the seasons")
+
+grid.arrange(p1, p2, ncol=1)
+```
+\begin{center}
+  \textbf{Figure 7:} \text{ The behavior of Depth\_to\_Groundwater\_\{P24, P25\} through the seasons}
+\end{center}
+
+From **Figure 7** we can observe an interesting pattern. Primarily let us define that when we speak about the direction that our data follows, we mean the following: when our values become less negative, we declare a positive direction. In plain terms this is due to the fact that when the values are closer to 0, it means our aquifer has more water.
+
+For winter and spring periods we recognize mostly a rise in our values which consequently means that we have a positive direction, while for summer in general the case is opposite. However, another amusing part of the plot is the purple representation which indicates the autumn period. In this case we see that the data is more concentrated and not very spread, which leads us to believe that not a lot of changes occur in the depth during this period. But let us continue absorbing the behavior with respect to the seasons. 
+
+## 3.2 Exploring temperature columns
+We assume that temperature plays a big role in assessing the current levels of water. Before studying it's relationship we are going to study both temperature features `Temperature_Bastia_Umbra` and `Temperature_Petrignano` to understand their differences and distributions.
+
+### 3.2.1 How does `Temperature_Bastia_Umbra` and `Temperature_Petrignano` differ from each other?
+
+```{r message=FALSE, warning=FALSE}
+p1 <- ggplot(train, aes(x=Temperature_Bastia_Umbra)) +
+  geom_histogram(aes(y = ..density..),
+                 colour = 1, fill = "white") +
+  geom_density(lwd = 1, colour = 5,
+               fill = 5, alpha = 0.25)
+
+
+p2 <- ggplot(train, aes(x=Temperature_Petrignano)) +
+  geom_histogram(aes(y = ..density..),
+                 colour = 1, fill = "white") +
+  geom_density(lwd = 1, colour = 2,
+               fill = 2, alpha = 0.25)
+
+grid.arrange(p1, p2, nrow = 1)
+```
+\begin{center}
+  \textbf{Figure 8:} \text{Distribution of Tempeture in Bastia Umbra and Petrignano}
+\end{center}
+
+```{r message=FALSE, warning=FALSE}
+p1 <- ggplot(train) +
+  geom_density(aes(x=Temperature_Bastia_Umbra, color="Temperature_Bastia_Umbra")) +
+  geom_density(aes(x=Temperature_Petrignano, color="Temperature_Petrignano")) +
+  xlab("Temperature columns [ºC]")
+
+p1
+```
+\begin{center}
+  \textbf{Figure 9:} \text{ Comparison of Temperature distributions}
+\end{center}
+
+From **Figure 8** and **Figure 9** we see that temperature in Bastia Umbra and Petrignano are not that different. This makes sense since these two points are only approximately just 5 km apart from each other.
+
+### 3.2.2 How much do `Temperature_Bastia_Umbra` and `Temperature_Petrignano` varies per year?
+
+```{r}
+p1 <- ggplot(train, aes(x=Year, y=Temperature_Bastia_Umbra)) + 
+    geom_boxplot(fill="slateblue", alpha=0.2) + 
+    xlab("Year")
+
+p2 <- ggplot(train, aes(x=Year, y=Temperature_Petrignano)) + 
+    geom_boxplot(fill="slateblue", alpha=0.2) + 
+    xlab("Year")
+
+grid.arrange(p1, p2, nrow = 1)
+```
+\begin{center}
+  \textbf{Figure 10:} \text{ Summaries Bastia Umbra and Petrignano temperatures per Year}
+\end{center}
+
+Temperatures seems to have a similar behavior over the past years. Except for Petrignano that in 2015 we see a sudden drop in temperature. This anomaly doesn't seems right since we don't see the same drop for Bastia Umbra.
+
+Plotting the temperature in Petrignano for 2015 we see (**Figure 11**) that a third of the data points registered a temperature of 0 ºC. We think this is more related to a data feeding problem perhaps due to sensors malfunctioning than to a real change in temperatures. For this reason and due to the fact that Bastia Umbra is a good estimator of Petrignano temperature we will no longer consider `Temperature_Petrignano` as one of the predictors for the direction of `Depth_to_Groundwater_{P24, P25}`
+
+```{r}
+train_2015 <- train %>% filter(Year == 2015)
+p1 <- ggplot(train_2015, aes(x=Date, y=Temperature_Petrignano)) +
+         geom_line()
+
+p1
+```
+\begin{center}
+  \textbf{Figure 11:} \text{ Petrignano Temperature for 2015}
+\end{center}
+
+
+### 3.2.3 Relationship between `Depth_to_Groundwater` and `Temperature`
+
+When we analyse the relationship between depth to ground water and temperature as a whole we don't find any clear pattern between the two. As we can see in **Figure 12**. 
+
+```{r}
+p1 <-
+  ggplot(train, aes(x=Depth_to_Groundwater_P24, y=Temperature_Bastia_Umbra)) +
+    geom_point()
+p1
+```
+\begin{center}
+  \textbf{Figure 12:} \text{ Depth to groundwater against temperature in Bastia Umbra}
+\end{center}
+
+
+On the other hand when analyzing the relationship independently per year (**Figure 13**) for most of the cases we see a pattern saying that when the temperature increases depth to groundwater also tends to increase.
+
+```{r fig.width = 10}
+p1 <-
+  ggplot(train, aes(x=Depth_to_Groundwater_P24, y=Temperature_Bastia_Umbra, color=Year)) +
+    geom_point()
+p1 <- p1 + facet_grid(rows = vars(Year), scales = "free")
+
+p2 <-
+  ggplot(train, aes(x=Depth_to_Groundwater_P25, y=Temperature_Bastia_Umbra, color=Year)) +
+    geom_point()
+p2 <- p2 + facet_grid(rows = vars(Year), scales = "free")
+
+
+grid.arrange(p1, p2, nrow = 1)
+```
+\begin{center}
+  \textbf{Figure 13:} \text{ Depth to groundwater against temperature in Bastia Umbra per year}
+\end{center}
+
+Some exceptions to the rule are seen for 2012 and 2016 where the trend is in the opposite direction (when temperature decreases depth of groundwater increases). This is an indicator that temperature alone is not enough to tell the behavior of depth to groundwater.
+
+Let's move forward and perform a similar analysis with `Rainfall_Bastia_Umbra`, another important feature that may affect the groundwater levels. 
+
+## 3.3 Exploring Rainfall in Basta Umbra
+
+```{r}
+p1 <- ggplot(train, aes(x=Date, y=Rainfall_Bastia_Umbra)) +
+         geom_line()
+
+p2 <- ggplot(train, aes(x=Rainfall_Bastia_Umbra)) +
+  geom_histogram(aes(y = ..density..),
+                 colour = 1, fill = "white") +
+  geom_density(lwd = 1, colour = 5,
+               fill = 5, alpha = 0.25)
+
+grid.arrange(p1, p2, nrow=1)
+```
+\begin{center}
+  \textbf{Figure 14:} \text{(left) : Rainfall in Bastia Umbra over time, (right): Distribution of Rainfall in Bastia Umbra}
+\end{center}
+
+In **Figure 14** we see a very right skew distribution for Rainfall. Meaning that during the analysed period most of the days did not rained. Let's explore if we can tell any pattern of how this affected the depth to ground water.
+
+
+### 3.3.1 Relationship between `Depth_to_Groundwater` and `Rainfall`
+
+```{r}
+rainfall <- data.frame(train$Rainfall_Bastia_Umbra)
+
+a=min(train$Depth_to_Groundwater_P24)
+b=max(train$Rainfall_Bastia_Umbra)
+ggplot() +
+  geom_col(aes(x=train$Date, y=train$Rainfall_Bastia_Umbra), colour="orange") +
+  geom_line(aes(x=train$Date, y=train$Depth_to_Groundwater_P24+50), colour="blue") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  ggtitle("Depth and Rainfall") +
+  xlab("Date") +
+  ylim(c(a,b)) +
+  scale_y_continuous(
+    "depth (-m)", 
+    sec.axis = sec_axis(~ . * 1.20, name = "rainfall (mm)"))
+```
+\begin{center}
+  \textbf{Figure 15:} \text{Groundwater depth and Rainfall trends}
+\end{center}
+
+Although the scales are different (rainfall is in millimeters while the depth is in meters), the dependency between the variables looks nice. In **Figure 15** it's clear that in the first 5 years, so until 2014, the rainfall ratio is much more occasional that the recent years. If we look at the most recent years, the depth is steady but at an higher level if compared to the first ones, with the exception of the 2012-2013 year gap. In that last one, it's clear that the rainfall was very small or non existent for a big range of time (approximately around summer) leading after that to an increase of the depth (that means a decrease of the water capacity - hydrometry).
+
+From logical thinking we are doing our analysis with the idea that the amount of rainfall directly affects the depth to groundwater values. For this purpose we focus a bit more on that relationship. In **Figure 16** we visualize the amount of days without any rainfall at all.
+
+What is intriguing to mention is that most of the year 2012 there was no registered rainfall. And if we go back to the depth to groundwater analysis and **Figure 5**, we see that this information complements our findings. It gives us a direct dependency of the rainfall and depth to groundwater data. In the following plot where we visualize the amount of rainfall during the years, we notice an eminent jump from the year 2012 to 2013 and it continuous to the following years.
+
+The last plot shows us the difference between rainfall values with respect to the seasons and this contributes to our findings plotted in **Figure 7**.
+
+
+```{r fig.width = 8}
+p1 <-
+  ggplot(train %>% filter(Rainfall_Bastia_Umbra == 0), aes(x=Year)) +
+    geom_bar() + 
+  ggtitle("Amount of days w/ 0 Rainfall") +
+  labs(y = "Days (count)")
+
+train_rain = train %>%
+  group_by(Year) %>%
+  summarize(Rainfall = sum(Rainfall_Bastia_Umbra))
+
+train_rain_season = train %>%
+  group_by(season) %>%
+  summarize(Rainfall = sum(Rainfall_Bastia_Umbra))   
+
+p2 <-
+  ggplot(train_rain, aes(x=Year, y=Rainfall)) +
+    geom_col() + 
+  ggtitle("Rainfall (mm) per Year") +
+  labs(y = "Rainfall (mm)")
+
+p3 <-
+  ggplot(train_rain_season, aes(x=season, y=Rainfall)) +
+    geom_col() + 
+  ggtitle("Rainfall (mm) per season") +
+  labs(y = "Rainfall (mm)")
+
+grid.arrange(p1, p2, p3, ncol = 3)
+
+```
+
+\begin{center}
+  \textbf{Figure 16:} \text{(left): Amount of days without rain per year. (middle): mm of rainfall per year. (right): mm of rainfall per season}
+\end{center}
+
+
+## 3.5 Correlations Between Features
+```{r}
+library(corrplot)
+par(mfrow=c(1,1))
+C <- cor(train[colnames(train)[2:8]])
+C2 <- C
+colnames(C2) <- c("Rainfall", "Depth P24", "Depth P25",
+                  "Temp Bastia", "Temp Petrignano",
+                  "Volume", "Hydrometry")
+rownames(C2) <- colnames(C2)
+corrplot(10*C2, is.corr = FALSE, method="shade", 
+         type='lower', tl.col = 'black', tl.srt = 45,
+         col = COL2('PuOr', 10), cl.ratio=.3, col.lim = c(-10, 10))
+
+```
+\begin{center}
+  \textbf{Figure 17:} \text{Correlation between features}
+\end{center}
+
+In addition to the diagonal and trivial correlations (like depth 24 and 25 or temperature between the cities), there are some interesting results to look at. As expected, the volume and the depth (both 24 and 25 distributions) are positively correlated: if the depth is increasing it means that the aquifer is increasing the space for water and so we would have a bigger volume, viceversa if we have a decreasing depth. 
+
+
+### 3.5.1 Correlations Matrices through Months
+As shown before, the selection by months it's useful to catch more correlations. By using the same statistics strategy done for the depth (the mean), the same will be evaluated for the other variables.
+
+We then first create a new dataframe of 12 rows (months) and as many columns as many features we want to exploit.
+
+
+```{r}
+rain_month <- train %>%
+  group_by(Month) %>%
+  summarise(Rainfall_Bastia_Umbra= round(sum(Rainfall_Bastia_Umbra)/96, 2))
+#96 is the total number of months in the train set
+
+hydro_month <- train %>%
+  group_by(Month) %>%
+  summarise(Hydrometry_Fiume_Chiascio_Petrignano=
+              round(mean(Hydrometry_Fiume_Chiascio_Petrignano), 2))
+
+vol_month <- train %>%
+  group_by(Month) %>%
+  summarise(Volume_C10_Petrignano= round(mean(Volume_C10_Petrignano), 2))
+
+temp_month <- train %>%
+  group_by(Month) %>%
+  summarise(Temperature_Bastia_Umbra= round(mean(Temperature_Bastia_Umbra), 2))
+
+monthly_df <- data.frame(Month= train_month_24[1],
+                         Depth_to_Groundwater_P24=train_month_24[2],
+                         Depth_to_Groundwater_P25=train_month_25[2],
+                         Rainfall_Bastia_Umbra=rain_month[2],
+                         Hydrometry_Fiume_Chiascio_Petrignano=hydro_month[2], 
+                         Volume_C10_Petrignano=vol_month[2],
+                         Temperature_Bastia_Umbra=temp_month[2])
+```
+
+```{r}
+D <- cor(monthly_df[colnames(monthly_df)[-1]])
+D2 <- D
+colnames(D2) <- c("Depth P24", "Depth P25", "Rainfall",
+                  "Hydrometry", "Volume",
+                  "Temp Bastia")
+rownames(D2) <- colnames(D2)
+corrplot(10*D2, is.corr = FALSE, method="shade", 
+         type='lower', tl.col = 'black', tl.srt = 45,
+         col = COL2('PuOr', 10), cl.ratio=.3, col.lim = c(-10, 10))
+```
+\begin{center}
+  \textbf{Figure 18:} \text{Correlation between features when agregated by month}
+\end{center}
+
+Compared to the previous point, the month matrix in **Figure 18** tells us more information about the variables. We can see that the temperature and the depth are properly correlated through each other, even if we already explained how this is not enough to forecast the problem. Another slight correlation is given by the hydrometry and the rainfall, that could be useful to understand the variables and their influences to each other. 
+
+### 3.5.2 Correlations Matrices through Seasons
+In addition we explore the correlations w.r.t the seasons. For this purpose we first create a new - seasons data frame.
+
+```{r}
+
+train_season24 <- train %>%
+  group_by(season) %>%
+  summarise(Depth_to_Groundwater_P24= round(mean(Depth_to_Groundwater_P24), 2))
+
+train_season25 <- train %>%
+  group_by(season) %>%
+  summarise(Depth_to_Groundwater_P25= round(mean(Depth_to_Groundwater_P25), 2))
+
+rain_season <- train %>%
+  group_by(season) %>%
+  summarise(Rainfall_Bastia_Umbra= round(sum(Rainfall_Bastia_Umbra)/4, 2))
+
+
+
+hydro_season <- train %>%
+  group_by(season) %>%
+  summarise(Hydrometry_Fiume_Chiascio_Petrignano=
+              round(mean(Hydrometry_Fiume_Chiascio_Petrignano), 2))
+
+vol_season <- train %>%
+  group_by(season) %>%
+  summarise(Volume_C10_Petrignano= round(mean(Volume_C10_Petrignano), 2))
+
+temp_season <- train %>%
+  group_by(season) %>%
+  summarise(Temperature_Bastia_Umbra= round(mean(Temperature_Bastia_Umbra), 2))
+
+season_df <- data.frame(season = train_season24[1],
+                         Depth_to_Groundwater_P24=train_season24[2],
+                         Depth_to_Groundwater_P25=train_season25[2],
+                         Rainfall_Bastia_Umbra=rain_season[2],
+                         Hydrometry_Fiume_Chiascio_Petrignano=hydro_season[2], 
+                         Volume_C10_Petrignano=vol_season[2],
+                         Temperature_Bastia_Umbra=temp_season[2])
+
+correlation <- cor(season_df[colnames(season_df)[-1]])
+C1 <- correlation
+colnames(C1) <- c("Depth P24","Depth P25", "Rainfall",
+                  "Hydrometry", "Volume",
+                  "Temp Bastia")
+rownames(C1) <- colnames(C1)
+corrplot(10*C1, is.corr = FALSE, method="shade", 
+         type='lower', tl.col = 'black', tl.srt = 45,
+         col = COL2('RdBu', 10), cl.ratio=.3, col.lim = c(-10, 10))
+
+```
+\begin{center}
+  \textbf{Figure 19:} \text{Correlation between features when agregated by seasons}
+\end{center}
+
+# 4. Experiments
+
+In this section we will experiment first with a (dummy) baseline that always predicts the day before direction. In theory any other more complex model should perform better than this simple heuristic. As a second type of model we will experiment with logistic regression using different predictors. Such as only waterbody related features (temperature, rainfall, volume, hydrometry), addition of lag variables and season.
+For every model we will track it's accuracy and F1-score.
+
+Before experimenting we will create the lag variables and target column (`Direction_{P24, P25}`) for the validation set.
+
+
+```{r}
+# extra features for validation set
+val <- create_lag(val, "Depth_to_Groundwater_P24", 1)
+val <- create_lag(val, "Depth_to_Groundwater_P25", 1)
+
+val <- create_lag(val, "Depth_to_Groundwater_P24", 2)
+val <- create_lag(val, "Depth_to_Groundwater_P25", 2)
+
+val <- create_direction(val, "Depth_to_Groundwater_P24")
+val <- create_direction(val, "Depth_to_Groundwater_P25")
+
+val <- create_season(val)
+```
+
+## 4.1 Baseline: Using previous day direction as prediction
+**1. Predicting Direction_P24**
+
+From the output below we can see that using the day before direction to predict `Direction_P24` is not good. We could get even better results by just random guessing.
+
+```{r, warning=FALSE}
+library(caret)
+
+val_lag <- create_lag(data=val, col_name="Direction_P24", step=1)
+baseline_preds <- val_lag$lag_1_Direction_P24
+confusionMatrix(as.factor(baseline_preds),
+                as.factor(val$Direction_P24),
+                mode = "everything",
+                positive = "1")
+```
+
+
+**2. Predicting Direction_P25**
+The baseline heuristic works a bit better for `Direction_P25` than it did for `Direction_P24`. But still the results are very close to random guessing. These two basic models are going to be our baselines to measure against the future more sophisticated models.
+
+
+```{r}
+val_lag <- create_lag(data=val, col_name="Direction_P25", step=1)
+baseline_preds <- val_lag$lag_1_Direction_P25
+confusionMatrix(as.factor(baseline_preds),
+                as.factor(val$Direction_P24),
+                mode = "everything",
+                positive = "1")
+```
+
+
+## 4.2 Logistic Regression
+
+### 4.2.1 Model 1: Predicting Direction using only river features
+
+For these two experiments we will only use `Rainfall_Bastia_Umbra`, `Temperature_Bastia_Umbra` and `Volume_C10_Petrignano`. No lag or season variables are added here.
+
+**1. Predicting Direction_P24**
+
+Looking at the p-values of the output below we see that all the variables can be considered significant. Being `Rainfall_Bastia_Umbra` the least significant one with a p-value of 0.00186.
+
+We also achieved a better performance than the baseline. With an accuracy of 0.609 and an F1-score of 0.591. 
+
+
+```{r}
+glm.fits <- glm (Direction_P24 ~
+                   Rainfall_Bastia_Umbra +
+                   Temperature_Bastia_Umbra +
+                   Volume_C10_Petrignano,
+                 data = train, family = binomial)
+summary(glm.fits)
+```
+
+```{r, warning=FALSE}
+library(recipes)
+
+glm.probs <- predict(glm.fits, val, type="response")
+glm.pred <- rep (0, 730)
+glm.pred[glm.probs > .5] = 1
+
+confusionMatrix(as.factor(glm.pred),
+                as.factor(val$Direction_P24),
+                mode = "everything",
+                positive = "1")
+
+
+```
+**2. Predicting Direction_P25**
+
+Let's perform a similar analysis but this time with the `Direction_P25` target.
+
+Looking at the p-values of the output below we see that all the variables can be considered significant. For `Direction_P25`, `Rainfall_Bastia_Umbra` seems to be more significant than for `Direction_P25`.
+
+We also achieved a better performance than the baseline. With an accuracy of 0.630 and an F1-score of 0.587.
+
+
+```{r}
+glm.fits <- glm (Direction_P25 ~
+                   Rainfall_Bastia_Umbra +
+                   Temperature_Bastia_Umbra +
+                   Volume_C10_Petrignano,
+                 data = train, family = binomial)
+summary(glm.fits)
+```
+```{r, warning=FALSE}
+library(recipes)
+
+glm.probs <- predict(glm.fits, val, type="response")
+glm.pred <- rep (0, 730)
+glm.pred[glm.probs > .5] = 1
+
+confusionMatrix(as.factor(glm.pred),
+                as.factor(val$Direction_P25),
+                mode = "everything",
+                positive = "1")
+
+
+```
+
+### 4.2.2 Model 2: Predicting direction using river features + lags
+Let's see if by adding lag predictors we are able to improve the model performance.
+
+**Predicting Direction_P24**
+
+Looking a the p-values below both the lag_1 and lag_2 seems to be significant. We also got a better F1-score performance of 0.601
+
+
+```{r}
+glm.fits <- glm (Direction_P24 ~ lag_1_Depth_to_Groundwater_P24 + 
+                   lag_2_Depth_to_Groundwater_P24 + 
+                   Rainfall_Bastia_Umbra +
+                   Temperature_Bastia_Umbra +
+                   Volume_C10_Petrignano,
+                 data = train, family = binomial)
+summary(glm.fits)
+```
+
+```{r}
+glm.probs <- predict(glm.fits, val, type="response")
+glm.pred <- rep (0, 730)
+glm.pred[glm.probs > .5] = 1
+
+confusionMatrix(as.factor(glm.pred),
+                as.factor(val$Direction_P24),
+                mode = "everything",
+                positive = "1")
+```
+
+**Predicting Direction_P25**
+
+Similar than the case for `Direction_P24` both the lag_1 and lag_2 seems to be significant. And this translates to a better F1-score of 0.6110.
+
+
+```{r}
+glm.fits <- glm (Direction_P25 ~ lag_1_Depth_to_Groundwater_P25 + 
+                   lag_2_Depth_to_Groundwater_P25 + 
+                   Rainfall_Bastia_Umbra +
+                   Temperature_Bastia_Umbra +
+                   Volume_C10_Petrignano,
+                 data = train, family = binomial)
+summary(glm.fits)
+```
+
+```{r}
+glm.probs <- predict(glm.fits, val, type="response")
+glm.pred <- rep (0, 730)
+glm.pred[glm.probs > .5] = 1
+
+confusionMatrix(as.factor(glm.pred),
+                as.factor(val$Direction_P25),
+                mode = "everything",
+                positive = "1")
+```
+### 4.2.3 Model 3: Predicting direction using river features + lags + season
+Finally let's experiment with what we have build up from the previous models but this time adding the `season` predictor.
+
+**Predicting Direction_P24**
+
+When compared with the previous model without `season` we see an slightly increment of the F1-score from 0.601 to 0.618.
+
+```{r}
+glm.fits_P24 <- glm (Direction_P24 ~ lag_1_Depth_to_Groundwater_P24 +
+                   lag_2_Depth_to_Groundwater_P24 +
+                   Rainfall_Bastia_Umbra +
+                   Temperature_Bastia_Umbra +
+                   Volume_C10_Petrignano +
+                   season,
+                 data = train, family = binomial)
+summary(glm.fits_P24)
+
+```
+```{r}
+glm.probs <- predict(glm.fits_P24, val, type="response")
+glm.pred <- rep (0, 730)
+glm.pred[glm.probs > .5] = 1
+
+confusionMatrix(as.factor(glm.pred),
+                as.factor(val$Direction_P24),
+                mode="everything",
+                positive="1")
+
+```
+**Predicting Direction_P25**
+
+When compared with the previous model with out `season` we see an slightly decrease of the F1-score from 0.6110 to 0.6073.
+
+```{r}
+glm.fits_P25 <- glm (Direction_P25 ~ lag_1_Depth_to_Groundwater_P25 +
+                   lag_2_Depth_to_Groundwater_P25 +
+                   Rainfall_Bastia_Umbra +
+                   Temperature_Bastia_Umbra +
+                   Volume_C10_Petrignano +
+                   season,
+                 data = train, family = binomial)
+summary(glm.fits_P25)
+
+```
+
+```{r}
+glm.probs <- predict(glm.fits_P25, val, type="response")
+glm.pred <- rep (0, 730)
+glm.pred[glm.probs > .5] = 1
+
+confusionMatrix(as.factor(glm.pred),
+                as.factor(val$Direction_P25), 
+                mode="everything",
+                positive="1")
+
+```
+
+## 4.3 Final Predictions
+In this section we will use our last model. To run the predictions on the previously mentioned hidden test set.
+
+
+```{r}
+
+# extra features for test set
+test <- create_lag(test, "Depth_to_Groundwater_P24", 1)
+test <- create_lag(test, "Depth_to_Groundwater_P25", 1)
+
+test <- create_lag(test, "Depth_to_Groundwater_P24", 2)
+test <- create_lag(test, "Depth_to_Groundwater_P25", 2)
+
+test <- create_direction(test, "Depth_to_Groundwater_P24")
+test <- create_direction(test, "Depth_to_Groundwater_P25")
+
+test <- create_season(test)
+```
+
+
+**1. Predicting Direction_P24 on the Test set**
+
+Final predictions for Direction_P24
+
+```{r}
+glm.probs <- predict(glm.fits_P24, test, type="response")
+glm.pred <- rep (0, nrow(test))
+glm.pred[glm.probs > .5] = 1
+
+confusionMatrix(as.factor(glm.pred),
+                as.factor(test$Direction_P24),
+                mode="everything",
+                positive="1")
+```
+
+**2. Predicting Direction_P25 on the Test set**
+
+
+```{r}
+glm.probs <- predict(glm.fits_P25, test, type="response")
+glm.pred <- rep (0, nrow(test))
+glm.pred[glm.probs > .5] = 1
+
+confusionMatrix(as.factor(glm.pred),
+                as.factor(test$Direction_P25),
+                mode="everything",
+                positive="1")
+```
+
+
+
+
+
+
+
+
+
+
+
+# 5. Results
+
+We represent our results in the **Table 2**. From there we can see that the Baseline model, which uses the previous day direction as prediction, is just slightly better than random guessing. When speaking about our 3 models, we contemplate that Model 2 and Model 3 have similar results for accuracy and F1 score. While Model 2 uses lags and information from our original data frame and Model 3 has seasons added to its combination. It is notable that these two models perform better than Model 1, which has as input only the lags and original data frame.
+From these findings we can conclude that the lags and seasons were an appropriate tool to asses the trend direction.
+
+\begin{table}[]
+\begin{center}
+\begin{tabular}{|c|cc|cc|}
+\hline
+\multicolumn{1}{|l|}{} & \multicolumn{2}{c|}{Accuracy}                        & \multicolumn{2}{c|}{F1-Score}                        \\ \hline
+Model                  & \multicolumn{1}{c|}{Direction\_P24} & Direction\_P25 & \multicolumn{1}{c|}{Direction\_P24} & Direction\_P25 \\ \hline
+Baseline               & \multicolumn{1}{c|}{0.495}          & 0.524          & \multicolumn{1}{c|}{0.425}          & 0.441          \\ \hline
+Model 1                & \multicolumn{1}{c|}{0.601}          & 0.630          & \multicolumn{1}{c|}{0.587}          & 0.587          \\ \hline
+Model 2                & \multicolumn{1}{c|}{0.599}          & 0.643          & \multicolumn{1}{c|}{0.601}          & 0.611          \\ \hline
+Model 3                & \multicolumn{1}{c|}{0.612}          & 0.644          & \multicolumn{1}{c|}{0.618}          & 0.607          \\ \hline
+\end{tabular}
+\end{center}
+\caption{Results: Accuracy and F1-score from the validation set}
+\end{table}
+
+
+From our so far findings we decided to go forward with Model 3 and use it to run the predictions on the hidden test set. The results from this have been displayed in **Table 3**
+
+\begin{table}[]
+\begin{center}
+\begin{tabular}{|c|cc|cc|}
+\hline
+\multicolumn{1}{|l|}{} & \multicolumn{2}{c|}{Accuracy (Test)}                 & \multicolumn{2}{c|}{F1-Score (Test)}                 \\ \hline
+Model                  & \multicolumn{1}{c|}{Direction\_P24} & Direction\_P25 & \multicolumn{1}{c|}{Direction\_P24} & Direction\_P25 \\ \hline
+Model 3                & \multicolumn{1}{c|}{0.567}          & 0.580          & \multicolumn{1}{c|}{0.6704}         & 0.659          \\ \hline
+\end{tabular}
+\end{center}
+\caption{Results: Accuracy and F1-score from the test set}
+\end{table}
+
+# 6. Conclusion
+In conclusion the task of predicting the groundwater level is not a simple one. Because of that, the task of the problem changed to the prediction of the trend direction of the water. We were able to obtain descent results (**Table 3**) with an logistic regression whose predictors contained information from the Petrignano aquifer, lag variables and seasons. We confirmed that temperature and the lack of rainfall plays a big role in the behavior of the groundwater levels. We also learned that the depth to groundwater trends are not stationary ones and because of this the task is a complex one.
